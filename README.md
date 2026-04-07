@@ -24,7 +24,7 @@ app_port: 8000
 
 <div align="center">
 
-![MCPSec Gym Demo](demo2.gif)
+![MCPSec Gym Demo](https://raw.githubusercontent.com/Udai1273/mcpsec-gym-rl-environment/main/demo2.gif)
 
 *An agent breaching easy mode in seconds.*
 
