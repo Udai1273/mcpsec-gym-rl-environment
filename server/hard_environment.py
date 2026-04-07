@@ -12,9 +12,9 @@ The agent faces a hardened internal services platform with 3 flags spread across
 WHY THIS IS HARD:
   1. More tools, more flags, more noise — the agent must filter signal from clutter
   2. The honeypot punishes random exploration (alert +2 on a single mistake)
-  3. Flags 3 and 4 require multi-step reasoning:
-       - Flag 3: decode_token with the JWT found via list_users(role="superadmin")
-       - Flag 4: use the secret from decode_token as parameter to check_endpoint
+  3. The final flag requires multi-step reasoning:
+       - decode_token with the JWT found via list_users(role="superadmin")
+       - use the secret from decode_token as parameter to check_endpoint
   4. Solve rate for random agent should be 0% — impossible by luck alone
 
 EPISODE VARIANTS:
@@ -165,6 +165,7 @@ class HardEnvironment(Environment):
         self._vulns_discovered: list[str] = []
         self._alert_level: int = 0
         self._steps_remaining: int = MAX_STEPS
+        self._recon_bonus_given: bool = False
         self._last_tool: str = ""
         self._consecutive_count: int = 0
         self._rng = random.Random()
@@ -185,6 +186,7 @@ class HardEnvironment(Environment):
         self._vulns_discovered: list[str] = []
         self._alert_level: int = 0
         self._steps_remaining: int = MAX_STEPS
+        self._recon_bonus_given: bool = False
         self._last_tool: str = ""
         self._consecutive_count: int = 0
 
@@ -359,11 +361,13 @@ class HardEnvironment(Environment):
         # Recon bonus: +0.02 once when search_files finds real paths
         if (
             not flags_found
+            and not self._recon_bonus_given
             and tool_name == "search_files"
             and "Found" in response
             and "file(s)" in response
         ):
             reward += 0.02
+            self._recon_bonus_given = True
 
         # --- Check if episode is done ---
         all_flags_found = len(self._flags_captured) >= TOTAL_FLAGS
@@ -387,7 +391,7 @@ class HardEnvironment(Environment):
             steps_remaining=self._steps_remaining,
             step_count=self._state.step_count,
             done=done,
-            reward=reward,
+            reward=max(min(reward, 1.0), -1.0),
         )
 
     @property

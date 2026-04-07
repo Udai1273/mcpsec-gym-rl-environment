@@ -155,6 +155,7 @@ class McpsecGymEnvironment(Environment):
         self._flags_captured: list[str] = []
         self._vulns_discovered: list[str] = []
         self._steps_remaining: int = MAX_STEPS
+        self._recon_bonus_given: bool = False
 
         # These are set by reset() — declare here to satisfy type checkers
         self._rng = random.Random()
@@ -183,6 +184,7 @@ class McpsecGymEnvironment(Environment):
         self._flags_captured: list[str] = []
         self._vulns_discovered: list[str] = []
         self._steps_remaining: int = MAX_STEPS
+        self._recon_bonus_given: bool = False
 
         # Pick variant and generate episode-unique flags
         self._variant = self._rng.choice(EPISODE_VARIANTS)
@@ -308,18 +310,20 @@ class McpsecGymEnvironment(Environment):
                 self._flags_captured.append(flag)
                 reward += 0.25
 
-        # Useful recon: +0.05 ONLY when search_files finds at least one real path.
+        # Useful recon: +0.05 ONLY ONCE when search_files finds at least one real path.
         # This rewards the agent for mapping the filesystem — a genuine first step
         # in a real pentest — without inflating reward for every long string.
         # read_file and get_config that don't yield a flag give nothing; the agent
         # must reason about what to read, not just try everything.
         if (
             not flags_found
+            and not self._recon_bonus_given
             and tool_name == "search_files"
             and "Found" in response
             and "file(s)" in response
         ):
             reward += 0.05
+            self._recon_bonus_given = True
 
         # --- Check if episode is done ---
         all_flags_found = len(self._flags_captured) >= TOTAL_FLAGS
@@ -401,7 +405,7 @@ class McpsecGymEnvironment(Environment):
             steps_remaining=self._steps_remaining,
             step_count=self._state.step_count,
             done=done,
-            reward=reward,
+            reward=max(min(reward, 1.0), -1.0),
         )
 
     # ------------------------------------------------------------------

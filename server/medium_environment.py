@@ -201,6 +201,7 @@ class MediumEnvironment(Environment):
         self._vulns_discovered: list[str] = []
         self._alert_level: int = 0
         self._steps_remaining: int = MAX_STEPS
+        self._recon_bonus_given: bool = False
         # Rate limiter: track last tool called and consecutive count
         self._last_tool: str = ""
         self._consecutive_count: int = 0
@@ -222,6 +223,7 @@ class MediumEnvironment(Environment):
         self._vulns_discovered: list[str] = []
         self._alert_level: int = 0
         self._steps_remaining: int = MAX_STEPS
+        self._recon_bonus_given: bool = False
         self._last_tool: str = ""
         self._consecutive_count: int = 0
 
@@ -388,11 +390,13 @@ class MediumEnvironment(Environment):
         # Recon bonus: +0.03 once when search_files finds real paths
         if (
             not flags_found
+            and not self._recon_bonus_given
             and tool_name == "search_files"
             and "Found" in response
             and "file(s)" in response
         ):
             reward += 0.03
+            self._recon_bonus_given = True
 
         # --- Check if episode is done ---
         all_flags_found = len(self._flags_captured) >= TOTAL_FLAGS
@@ -421,7 +425,7 @@ class MediumEnvironment(Environment):
             steps_remaining=self._steps_remaining,
             step_count=self._state.step_count,
             done=done,
-            reward=reward,
+            reward=max(min(reward, 1.0), -1.0),
         )
 
     @property

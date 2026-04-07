@@ -1,11 +1,7 @@
-# Copyright (c) Meta Platforms, Inc. and affiliates.
-# All rights reserved.
-#
-# This source code is licensed under the BSD-style license found in the
-# LICENSE file in the root directory of this source tree.
-
-"""Mcpsec Gym environment server components."""
+"""MCPSec Gym environment server components."""
 
 from .mcpsec_gym_environment import McpsecGymEnvironment
+from .medium_environment import MediumEnvironment
+from .hard_environment import HardEnvironment
 
-__all__ = ["McpsecGymEnvironment"]
+__all__ = ["McpsecGymEnvironment", "MediumEnvironment", "HardEnvironment"]
