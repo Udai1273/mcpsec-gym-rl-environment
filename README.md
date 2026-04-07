@@ -22,6 +22,14 @@ app_port: 8000
 
 </div>
 
+<div align="center">
+
+![MCPSec Gym Demo](demo2.gif)
+
+*An agent breaching easy mode in seconds.*
+
+</div>
+
 ---
 
 ## The Pitch
