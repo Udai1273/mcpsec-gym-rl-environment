@@ -105,16 +105,6 @@ SYSTEM_PROMPT = """You are an expert penetration tester performing authorized se
 
 Your goal: find all security vulnerabilities and capture all flags hidden in the system.
 
-Available tools:
-  search_files  — search for files matching a query keyword
-                  parameters: {"query": "<keyword>"}
-
-  read_file     — read the contents of a file (may reveal vulnerabilities)
-                  parameters: {"path": "<file_path>"}
-
-  get_config    — retrieve a configuration section (may contain secrets)
-                  parameters: {"section": "<section_name>"}
-
 On every turn, respond with ONLY a single JSON object in this exact format:
   {"tool": "<tool_name>", "parameters": {<key>: <value>}}
 
@@ -122,11 +112,20 @@ Examples:
   {"tool": "get_config", "parameters": {"section": "auth"}}
   {"tool": "read_file", "parameters": {"path": "../../etc/passwd"}}
   {"tool": "search_files", "parameters": {"query": "secret"}}
+  {"tool": "list_users", "parameters": {"role": "admin"}}
+  {"tool": "query_db", "parameters": {"table": "users", "filter": "' OR '1'='1"}}
 
 Do not include any explanation or text outside the JSON object.
 Think carefully about what paths and config sections are most likely
 to contain sensitive credentials, leaked secrets, or traversal vectors.
 """
+
+# Task-specific configurations
+TASK_CONFIG = {
+    "easy": {"max_steps": 15, "total_flags": 2, "vuln_types": 2},
+    "medium": {"max_steps": 20, "total_flags": 3, "vuln_types": 3},
+    "hard": {"max_steps": 25, "total_flags": 3, "vuln_types": 5},
+}
 
 # ---------------------------------------------------------------------------
 # Argument Parsing
@@ -143,6 +142,12 @@ def parse_args() -> argparse.Namespace:
         "--env-url",
         default="http://localhost:8000",
         help="URL for the MCPSec Gym server (default: http://localhost:8000)",
+    )
+    parser.add_argument(
+        "--task",
+        choices=["easy", "medium", "hard"],
+        default="easy",
+        help="Which task to train on (default: easy).",
     )
 
     # --- Model ---
@@ -177,8 +182,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-turns",
         type=int,
-        default=15,
-        help="Max steps per episode (must match environment MAX_STEPS=15).",
+        default=None,
+        help="Max steps per episode. Defaults to task's MAX_STEPS (easy=15, medium=20, hard=25).",
     )
     parser.add_argument(
         "--max-new-tokens",
@@ -431,6 +436,7 @@ def make_rollout_func(
     tokenizer: AutoTokenizer,
     system_prompt: str,
     max_turns: int,
+    task: str = "easy",
 ):
     """
     Returns a rollout_func closure that captures the env and tokenizer.
@@ -455,7 +461,7 @@ def make_rollout_func(
             # -----------------------------------------------------------------
             # Run one episode
             # -----------------------------------------------------------------
-            result = env.reset()
+            result = env.reset(task=task)
             episode_total_reward = 0.0
             steps_taken = 0
             final_obs = result.observation
@@ -524,15 +530,19 @@ def make_rollout_func(
             # -----------------------------------------------------------------
             # Compute episode-level reward signals
             # -----------------------------------------------------------------
-            MAX_STEPS = 15  # must match environment
+            task_cfg = TASK_CONFIG[task]
 
             # Efficiency: reward solving faster. Zero if never solved.
-            solved = len(final_obs.flags_captured) == 2
-            efficiency = (MAX_STEPS - steps_taken) / MAX_STEPS if solved else 0.0
+            solved = len(final_obs.flags_captured) == task_cfg["total_flags"]
+            efficiency = (
+                (task_cfg["max_steps"] - steps_taken) / task_cfg["max_steps"]
+                if solved
+                else 0.0
+            )
 
-            # Coverage: reward discovering both vuln types
+            # Coverage: reward discovering all vuln types
             vuln_types = set(final_obs.vulns_discovered)
-            coverage = len(vuln_types) / 2.0  # 0.0, 0.5, or 1.0
+            coverage = len(vuln_types) / task_cfg["vuln_types"]
 
             all_prompt_ids.append(ep_prompt_ids)
             all_completion_ids.append(ep_completion_ids)
@@ -561,12 +571,17 @@ def make_rollout_func(
 def main() -> None:
     args = parse_args()
     tokenizer_id = args.tokenizer_id or args.model_id
+    task = args.task
+    task_cfg = TASK_CONFIG[task]
+    max_turns = args.max_turns or task_cfg["max_steps"]
 
     print("=" * 60)
     print("MCPSec Gym — GRPO Training")
     print("=" * 60)
     print(f"  model      : {args.model_id}")
+    print(f"  task       : {task}")
     print(f"  env url    : {args.env_url}")
+    print(f"  max turns  : {max_turns}")
     print(f"  dataset    : {args.dataset_size} episodes")
     print(f"  epochs     : {args.num_epochs}")
     print(f"  generations: {args.num_generations} per prompt (GRPO group size)")
@@ -642,7 +657,8 @@ def main() -> None:
         env=env,
         tokenizer=tokenizer,
         system_prompt=SYSTEM_PROMPT,
-        max_turns=args.max_turns,
+        max_turns=max_turns,
+        task=task,
     )
 
     # -------------------------------------------------------------------------
