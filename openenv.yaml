@@ -5,3 +5,35 @@ runtime: fastapi
 app: server.app:app
 port: 8000
 
+description: >
+  A dynamic RL environment for MCP server security testing.
+  Agents discover and exploit real-world vulnerabilities (config leaks,
+  path traversal, IDOR, SQL injection, JWT tampering) across 3 difficulty
+  levels with 12 episode variants and intra-variant randomization.
+
+tasks:
+  - id: easy
+    name: Config Leak
+    description: Find 2 flags via config leak and path traversal on a file server
+    max_steps: 15
+    flags: 2
+
+  - id: medium
+    name: Chain Reaction
+    description: Chain IDOR → SQL injection → config leak on an API server
+    max_steps: 20
+    flags: 3
+
+  - id: hard
+    name: Fortress Breach
+    description: Breach a hardened platform with honeypot, rate limiter, and lockout
+    max_steps: 25
+    flags: 3
+
+evaluation:
+  metric: episode_reward
+  higher_is_better: true
+  baseline_random_agent:
+    easy: 0.13
+    medium: 0.12
+    hard: 0.02
