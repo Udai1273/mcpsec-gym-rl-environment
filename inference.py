@@ -14,7 +14,7 @@ ENVIRONMENT VARIABLES (all required):
     API_BASE_URL      : Base URL of the OpenAI-compatible API endpoint
     MODEL_NAME        : Model name to use (e.g., "gpt-4o-mini", "Qwen/Qwen2.5-72B-Instruct")
     HF_TOKEN          : Hugging Face token (used as API key if no separate key is provided)
-    LOCAL_IMAGE_NAME  : Docker image name for from_docker_image() (optional — if set, spins
+    IMAGE_NAME        : Docker image name for from_docker_image() (optional — if set, spins
                         up a container; otherwise connects to ENV_URL)
 
 STDOUT FORMAT:
@@ -37,9 +37,10 @@ import sys
 from collections import deque
 from typing import List, Optional
 
-from openai import OpenAI
+# Ensure project root is on path for client/models imports
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-sys.path.insert(0, os.path.dirname(__file__))
+from openai import OpenAI
 
 from client import MCPSecGymEnv
 from models import MCPSecAction
@@ -51,7 +52,10 @@ from models import MCPSecAction
 API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "no-key-required"
-LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
+# The validator may set either IMAGE_NAME or LOCAL_IMAGE_NAME
+IMAGE_NAME = os.getenv("IMAGE_NAME") or os.getenv("LOCAL_IMAGE_NAME")
+# ENV_URL: where the environment server runs. The validator may set this,
+# or we fall back to localhost (for local dev).
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
 BENCHMARK = "mcpsec_gym"
 SUCCESS_THRESHOLD = 0.1
@@ -533,11 +537,20 @@ async def main() -> None:
 
     # Create environment: use Docker image if LOCAL_IMAGE_NAME is set,
     # otherwise connect to ENV_URL (for local dev / HF Space).
-    if LOCAL_IMAGE_NAME:
-        env = await MCPSecGymEnv.from_docker_image(LOCAL_IMAGE_NAME)
-    else:
-        env = MCPSecGymEnv(base_url=ENV_URL)
-        await env.connect()
+    env = None
+    try:
+        if IMAGE_NAME:
+            env = await MCPSecGymEnv.from_docker_image(IMAGE_NAME)
+        else:
+            env = MCPSecGymEnv(base_url=ENV_URL)
+            await env.connect()
+    except Exception as e:
+        print(f"[DEBUG] Failed to connect to environment: {e}", flush=True)
+        # Emit minimal structured output so validator sees something
+        for task in ["easy", "medium", "hard"]:
+            log_start(task=task, env=BENCHMARK, model=MODEL_NAME)
+            log_end(success=False, steps=0, score=0.0, rewards=[])
+        return
 
     try:
         for task in ["easy", "medium", "hard"]:
