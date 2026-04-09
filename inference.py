@@ -387,9 +387,13 @@ def run_task(task_name: str, llm_client: OpenAI) -> float:
     print(f"Task: {task_name.upper()}")
     print(f"{'=' * 60}")
 
+    # Structured output: [START]
+    print(f"[START] task={task_name}", flush=True)
+
     env = MCPSecGymEnv(base_url=ENV_URL).sync()
     total_reward = 0.0
     llm_calls = 0
+    step_num = 0
 
     try:
         with env:
@@ -406,6 +410,8 @@ def run_task(task_name: str, llm_client: OpenAI) -> float:
             for step in range(MAX_STEPS_PER_TASK):
                 if obs.done:
                     break
+
+                step_num = step + 1
 
                 # Try deterministic policy first
                 action = policy.next_action()
@@ -443,8 +449,18 @@ def run_task(task_name: str, llm_client: OpenAI) -> float:
                 # Let policy observe the response and adapt
                 policy.observe(action, obs.tool_response)
 
+                # Structured output: [STEP]
                 print(
-                    f"  Step {step + 1:2d} [{source}]: {action.tool_name:20s} "
+                    f"[STEP] step={step_num} reward={result.reward:.4f} "
+                    f"total_reward={total_reward:.4f} "
+                    f"tool={action.tool_name} "
+                    f"flags={len(obs.flags_captured)} "
+                    f"done={obs.done}",
+                    flush=True,
+                )
+
+                print(
+                    f"  Step {step_num:2d} [{source}]: {action.tool_name:20s} "
                     f"reward={result.reward:+.3f}  "
                     f"flags={obs.flags_captured}  "
                     f"alert={obs.alert_level}  "
@@ -478,6 +494,13 @@ def run_task(task_name: str, llm_client: OpenAI) -> float:
         print(f"  [ERROR] Episode failed: {e}")
 
     score = max(0.0, min(1.0, total_reward))
+
+    # Structured output: [END]
+    print(
+        f"[END] task={task_name} score={score:.4f} steps={step_num}",
+        flush=True,
+    )
+
     print(f"\n  Final score for {task_name}: {score:.4f}  (LLM calls: {llm_calls})")
     return score
 
