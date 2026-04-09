@@ -11,9 +11,16 @@ The agent follows a structured penetration testing methodology:
   4. Fall back to LLM reasoning when deterministic policy exhausts its options
 
 ENVIRONMENT VARIABLES (all required):
-    API_BASE_URL : Base URL of the OpenAI-compatible API endpoint
-    MODEL_NAME   : Model name to use (e.g., "gpt-4o-mini", "Qwen/Qwen2.5-72B-Instruct")
-    HF_TOKEN     : Hugging Face token (used as API key if no separate key is provided)
+    API_BASE_URL      : Base URL of the OpenAI-compatible API endpoint
+    MODEL_NAME        : Model name to use (e.g., "gpt-4o-mini", "Qwen/Qwen2.5-72B-Instruct")
+    HF_TOKEN          : Hugging Face token (used as API key if no separate key is provided)
+    LOCAL_IMAGE_NAME  : Docker image name for from_docker_image() (optional — if set, spins
+                        up a container; otherwise connects to ENV_URL)
+
+STDOUT FORMAT:
+    [START] task=<task> env=mcpsec_gym model=<model>
+    [STEP]  step=<n> action=<action_str> reward=<0.00> done=<true|false> error=<msg|null>
+    [END]   success=<true|false> steps=<n> score=<0.00> rewards=<r1,r2,...,rn>
 
 USAGE:
     export API_BASE_URL="https://api.openai.com/v1"
@@ -22,13 +29,13 @@ USAGE:
     python inference.py
 """
 
+import asyncio
 import json
 import os
 import re
 import sys
-import time
-import urllib.request
 from collections import deque
+from typing import List, Optional
 
 from openai import OpenAI
 
@@ -389,7 +396,7 @@ def log_start(task: str, env: str, model: str) -> None:
 
 
 def log_step(
-    step: int, action: str, reward: float, done: bool, error: str | None
+    step: int, action: str, reward: float, done: bool, error: Optional[str]
 ) -> None:
     error_val = error if error else "null"
     done_val = str(done).lower()
@@ -399,7 +406,7 @@ def log_step(
     )
 
 
-def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+def log_end(success: bool, steps: int, score: float, rewards: List[float]) -> None:
     rewards_str = ",".join(f"{r:.2f}" for r in rewards)
     print(
         f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
@@ -408,102 +415,100 @@ def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> No
 
 
 # ---------------------------------------------------------------------------
-# Single-task episode runner
+# Single-task episode runner (async)
 # ---------------------------------------------------------------------------
 
 
-def run_task(task_name: str, llm_client: OpenAI) -> float:
+async def run_task(task_name: str, llm_client: OpenAI, env: MCPSecGymEnv) -> float:
     """Run one episode of the given task using the hybrid agent."""
 
-    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
-
-    env = MCPSecGymEnv(base_url=ENV_URL).sync()
-    rewards: list[float] = []
+    rewards: List[float] = []
     llm_calls = 0
     step_num = 0
     score = 0.0
     success = False
 
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
+
     try:
-        with env:
-            result = env.reset(task=task_name)
-            obs = result.observation
+        result = await env.reset(task=task_name)
+        obs = result.observation
 
-            policy = DeterministicPolicy(task_name, obs.available_tools)
-            history: list[str] = []
+        policy = DeterministicPolicy(task_name, obs.available_tools)
+        history: List[str] = []
 
-            for step in range(MAX_STEPS_PER_TASK):
-                if obs.done:
-                    break
+        for step in range(MAX_STEPS_PER_TASK):
+            if obs.done:
+                break
 
-                step_num = step + 1
+            step_num = step + 1
 
-                # Try deterministic policy first
-                action = policy.next_action()
+            # Try deterministic policy first
+            action = policy.next_action()
 
-                # Fall back to LLM if deterministic queue is empty
-                if action is None:
-                    action = llm_decide(
-                        llm_client,
-                        obs.tool_response,
-                        obs.flags_captured,
-                        obs.steps_remaining,
-                        obs.available_tools,
-                        history,
-                    )
-                    llm_calls += 1
+            # Fall back to LLM if deterministic queue is empty
+            if action is None:
+                action = llm_decide(
+                    llm_client,
+                    obs.tool_response,
+                    obs.flags_captured,
+                    obs.steps_remaining,
+                    obs.available_tools,
+                    history,
+                )
+                llm_calls += 1
 
-                # Ultimate fallback: search_files with a new query
-                if action is None:
-                    action = MCPSecAction(
-                        tool_name="search_files",
-                        parameters={"query": f"flag{step}"},
-                    )
-
-                # Execute
-                result = env.step(action)
-                obs = result.observation
-                reward = result.reward
-                rewards.append(reward)
-
-                desc = f"{action.tool_name}({json.dumps(action.parameters)})"
-                history.append(desc)
-
-                # Let policy observe the response and adapt
-                policy.observe(action, obs.tool_response)
-
-                # Structured output: [STEP]
-                action_str = f"{action.tool_name}({json.dumps(action.parameters)})"
-                log_step(
-                    step=step_num,
-                    action=action_str,
-                    reward=reward,
-                    done=obs.done,
-                    error=None,
+            # Ultimate fallback: search_files with a new query
+            if action is None:
+                action = MCPSecAction(
+                    tool_name="search_files",
+                    parameters={"query": f"flag{step}"},
                 )
 
-            # Make at least one LLM call per task for hackathon compliance
-            if llm_calls == 0:
-                try:
-                    llm_client.chat.completions.create(
-                        model=MODEL_NAME,
-                        messages=[
-                            {"role": "system", "content": LLM_SYSTEM_PROMPT},
-                            {
-                                "role": "user",
-                                "content": (
-                                    f"Task '{task_name}' complete. "
-                                    f"Flags: {obs.flags_captured}. "
-                                    f"Summarize findings as JSON."
-                                ),
-                            },
-                        ],
-                        max_tokens=100,
-                        temperature=0.0,
-                    )
-                    llm_calls = 1
-                except Exception:
-                    pass
+            # Execute
+            result = await env.step(action)
+            obs = result.observation
+            reward = result.reward
+            rewards.append(reward)
+
+            desc = f"{action.tool_name}({json.dumps(action.parameters)})"
+            history.append(desc)
+
+            # Let policy observe the response and adapt
+            policy.observe(action, obs.tool_response)
+
+            # Structured output: [STEP]
+            action_str = f"{action.tool_name}({json.dumps(action.parameters)})"
+            log_step(
+                step=step_num,
+                action=action_str,
+                reward=reward,
+                done=obs.done,
+                error=None,
+            )
+
+        # Make at least one LLM call per task for hackathon compliance
+        if llm_calls == 0:
+            try:
+                llm_client.chat.completions.create(
+                    model=MODEL_NAME,
+                    messages=[
+                        {"role": "system", "content": LLM_SYSTEM_PROMPT},
+                        {
+                            "role": "user",
+                            "content": (
+                                f"Task '{task_name}' complete. "
+                                f"Flags: {obs.flags_captured}. "
+                                f"Summarize findings as JSON."
+                            ),
+                        },
+                    ],
+                    max_tokens=100,
+                    temperature=0.0,
+                )
+                llm_calls = 1
+            except Exception:
+                pass
 
         score = max(0.0, min(1.0, sum(rewards)))
         success = score >= SUCCESS_THRESHOLD
@@ -518,28 +523,31 @@ def run_task(task_name: str, llm_client: OpenAI) -> float:
 
 
 # ---------------------------------------------------------------------------
-# Main entry point
+# Main entry point (async)
 # ---------------------------------------------------------------------------
 
 
-def main():
+async def main() -> None:
     """Run all 3 MCPSec tasks and print scores."""
     llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
-    # Verify server is reachable
-    try:
-        with urllib.request.urlopen(f"{ENV_URL}/health", timeout=10) as r:
-            health = json.loads(r.read())
-            assert health.get("status") == "healthy", f"Unhealthy: {health}"
-    except Exception as e:
-        print(
-            f"[DEBUG] Could not reach environment server at {ENV_URL}: {e}", flush=True
-        )
+    # Create environment: use Docker image if LOCAL_IMAGE_NAME is set,
+    # otherwise connect to ENV_URL (for local dev / HF Space).
+    if LOCAL_IMAGE_NAME:
+        env = await MCPSecGymEnv.from_docker_image(LOCAL_IMAGE_NAME)
+    else:
+        env = MCPSecGymEnv(base_url=ENV_URL)
+        await env.connect()
 
-    scores = {}
-    for task in ["easy", "medium", "hard"]:
-        scores[task] = run_task(task, llm_client)
+    try:
+        for task in ["easy", "medium", "hard"]:
+            await run_task(task, llm_client, env)
+    finally:
+        try:
+            await env.close()
+        except Exception as e:
+            print(f"[DEBUG] env.close() error: {e}", flush=True)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
