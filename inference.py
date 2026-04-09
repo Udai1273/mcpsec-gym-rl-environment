@@ -41,10 +41,13 @@ from models import MCPSecAction
 # Configuration
 # ---------------------------------------------------------------------------
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://localhost:8000")
+API_BASE_URL = os.getenv("API_BASE_URL", "https://api.openai.com/v1")
 MODEL_NAME = os.getenv("MODEL_NAME", "gpt-4o-mini")
 API_KEY = os.getenv("HF_TOKEN") or os.getenv("API_KEY") or "no-key-required"
+LOCAL_IMAGE_NAME = os.getenv("LOCAL_IMAGE_NAME")
 ENV_URL = os.getenv("ENV_URL", "http://localhost:8000")
+BENCHMARK = "mcpsec_gym"
+SUCCESS_THRESHOLD = 0.1
 
 # Match environment step limits: easy=15, medium=20, hard=25.
 MAX_STEPS_PER_TASK = 25
@@ -377,32 +380,54 @@ def llm_decide(
 
 
 # ---------------------------------------------------------------------------
+# Structured stdout logging (required by openenv validator)
+# ---------------------------------------------------------------------------
+
+
+def log_start(task: str, env: str, model: str) -> None:
+    print(f"[START] task={task} env={env} model={model}", flush=True)
+
+
+def log_step(
+    step: int, action: str, reward: float, done: bool, error: str | None
+) -> None:
+    error_val = error if error else "null"
+    done_val = str(done).lower()
+    print(
+        f"[STEP] step={step} action={action} reward={reward:.2f} done={done_val} error={error_val}",
+        flush=True,
+    )
+
+
+def log_end(success: bool, steps: int, score: float, rewards: list[float]) -> None:
+    rewards_str = ",".join(f"{r:.2f}" for r in rewards)
+    print(
+        f"[END] success={str(success).lower()} steps={steps} score={score:.2f} rewards={rewards_str}",
+        flush=True,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Single-task episode runner
 # ---------------------------------------------------------------------------
 
 
 def run_task(task_name: str, llm_client: OpenAI) -> float:
     """Run one episode of the given task using the hybrid agent."""
-    print(f"\n{'=' * 60}")
-    print(f"Task: {task_name.upper()}")
-    print(f"{'=' * 60}")
 
-    # Structured output: [START]
-    print(f"[START] task={task_name}", flush=True)
+    log_start(task=task_name, env=BENCHMARK, model=MODEL_NAME)
 
     env = MCPSecGymEnv(base_url=ENV_URL).sync()
-    total_reward = 0.0
+    rewards: list[float] = []
     llm_calls = 0
     step_num = 0
+    score = 0.0
+    success = False
 
     try:
         with env:
             result = env.reset(task=task_name)
             obs = result.observation
-
-            print(f"  Tools: {obs.available_tools}")
-            print(f"  Steps: {obs.steps_remaining}")
-            print()
 
             policy = DeterministicPolicy(task_name, obs.available_tools)
             history: list[str] = []
@@ -415,7 +440,6 @@ def run_task(task_name: str, llm_client: OpenAI) -> float:
 
                 # Try deterministic policy first
                 action = policy.next_action()
-                source = "DET"
 
                 # Fall back to LLM if deterministic queue is empty
                 if action is None:
@@ -428,7 +452,6 @@ def run_task(task_name: str, llm_client: OpenAI) -> float:
                         history,
                     )
                     llm_calls += 1
-                    source = "LLM"
 
                 # Ultimate fallback: search_files with a new query
                 if action is None:
@@ -436,35 +459,27 @@ def run_task(task_name: str, llm_client: OpenAI) -> float:
                         tool_name="search_files",
                         parameters={"query": f"flag{step}"},
                     )
-                    source = "FALL"
 
                 # Execute
                 result = env.step(action)
                 obs = result.observation
-                total_reward += result.reward
+                reward = result.reward
+                rewards.append(reward)
 
-                desc = f"{action.tool_name}({action.parameters})"
+                desc = f"{action.tool_name}({json.dumps(action.parameters)})"
                 history.append(desc)
 
                 # Let policy observe the response and adapt
                 policy.observe(action, obs.tool_response)
 
                 # Structured output: [STEP]
-                print(
-                    f"[STEP] step={step_num} reward={result.reward:.4f} "
-                    f"total_reward={total_reward:.4f} "
-                    f"tool={action.tool_name} "
-                    f"flags={len(obs.flags_captured)} "
-                    f"done={obs.done}",
-                    flush=True,
-                )
-
-                print(
-                    f"  Step {step_num:2d} [{source}]: {action.tool_name:20s} "
-                    f"reward={result.reward:+.3f}  "
-                    f"flags={obs.flags_captured}  "
-                    f"alert={obs.alert_level}  "
-                    f"done={obs.done}"
+                action_str = f"{action.tool_name}({json.dumps(action.parameters)})"
+                log_step(
+                    step=step_num,
+                    action=action_str,
+                    reward=reward,
+                    done=obs.done,
+                    error=None,
                 )
 
             # Make at least one LLM call per task for hackathon compliance
@@ -490,18 +505,15 @@ def run_task(task_name: str, llm_client: OpenAI) -> float:
                 except Exception:
                     pass
 
+        score = max(0.0, min(1.0, sum(rewards)))
+        success = score >= SUCCESS_THRESHOLD
+
     except Exception as e:
-        print(f"  [ERROR] Episode failed: {e}")
+        print(f"[DEBUG] Episode failed: {e}", flush=True)
 
-    score = max(0.0, min(1.0, total_reward))
+    finally:
+        log_end(success=success, steps=step_num, score=score, rewards=rewards)
 
-    # Structured output: [END]
-    print(
-        f"[END] task={task_name} score={score:.4f} steps={step_num}",
-        flush=True,
-    )
-
-    print(f"\n  Final score for {task_name}: {score:.4f}  (LLM calls: {llm_calls})")
     return score
 
 
@@ -512,12 +524,6 @@ def run_task(task_name: str, llm_client: OpenAI) -> float:
 
 def main():
     """Run all 3 MCPSec tasks and print scores."""
-    print("MCPSec Gym — Hybrid Inference Agent")
-    print(f"API_BASE_URL : {API_BASE_URL}")
-    print(f"MODEL_NAME   : {MODEL_NAME}")
-    print(f"ENV_URL      : {ENV_URL}")
-    print()
-
     llm_client = OpenAI(base_url=API_BASE_URL, api_key=API_KEY)
 
     # Verify server is reachable
@@ -525,26 +531,14 @@ def main():
         with urllib.request.urlopen(f"{ENV_URL}/health", timeout=10) as r:
             health = json.loads(r.read())
             assert health.get("status") == "healthy", f"Unhealthy: {health}"
-            print(f"Environment server healthy at {ENV_URL}")
     except Exception as e:
-        print(f"[WARN] Could not reach environment server at {ENV_URL}: {e}")
-        print("Proceeding anyway — WebSocket may still work.")
-
-    start_time = time.time()
+        print(
+            f"[DEBUG] Could not reach environment server at {ENV_URL}: {e}", flush=True
+        )
 
     scores = {}
     for task in ["easy", "medium", "hard"]:
         scores[task] = run_task(task, llm_client)
-
-    elapsed = time.time() - start_time
-
-    print(f"\n{'=' * 60}")
-    print("FINAL SCORES")
-    print(f"{'=' * 60}")
-    for task, score in scores.items():
-        print(f"  {task:10s}: {score:.4f}")
-    print(f"\nTotal runtime : {elapsed:.1f}s")
-    print(f"{'=' * 60}")
 
 
 if __name__ == "__main__":
