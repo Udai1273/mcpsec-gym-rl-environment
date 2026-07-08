@@ -1,3 +1,5 @@
+[![MseeP.ai Security Assessment Badge](https://mseep.net/pr/udai-negi-mcpsec-gym-rl-environment-badge.png)](https://mseep.ai/app/udai-negi-mcpsec-gym-rl-environment)
+
 ---
 title: MCPSec Gym
 emoji: 🔐
